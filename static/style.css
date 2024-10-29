@@ -1,0 +1,16 @@
+body {
+    font-family: Arial, sans-serif;
+    text-align: center;
+}
+
+#image-container {
+    position: relative;
+}
+
+#uploaded-image {
+    max-width: 100%;
+}
+
+#canvas {
+    position: absolute;
+}

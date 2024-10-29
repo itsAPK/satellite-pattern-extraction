@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Image Pattern Extraction</title>
+        <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+        <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.12/cropper.min.js"></script>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.12/cropper.min.css" />
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.16.9/xlsx.full.min.js"></script>
+    </head>
+<body class="bg-gray-100">
+
+<div class="container mx-auto py-10">
+    <div class="bg-white rounded-lg shadow-lg p-6">
+        <h2 class="text-2xl font-bold mb-10 text-center ">Satallite Image Processing and Pattern Extraction</h2>
+
+        <!-- Image Upload Section -->
+        <form id="uploadForm" enctype="multipart/form-data">
+            <input type="file" id="fileInput" class="mb-4 p-2 border border-gray-300 rounded" accept="image/*" />
+            <button type="submit" class="bg-blue-500 text-white px-4 py-2 rounded">Upload Image</button>
+        </form>
+
+        <!-- Uploaded Image Preview with ROI Selection -->
+        <div id="image-container" class="mt-6 hidden">
+            <img id="uploadedImage" class=" max-w-full" alt="Uploaded Image" />
+            <div class="flex justify-center mt-4">
+                <button id="zoomIn" class="bg-gray-300 px-4 py-2 mx-2 rounded">Zoom In</button>
+                <button id="zoomOut" class="bg-gray-300 px-4 py-2 mx-2 rounded">Zoom Out</button>
+            </div>
+        </div>
+
+        <!-- ROI Selection -->
+        <div id="roi-section" class="mt-6 hidden">
+            <h2 class="text-xl font-semibold">Select Region of Interest (ROI)</h2>
+            <button id="extractPatterns" class="mt-4 bg-green-500 text-white px-4 py-2 rounded">Extract Patterns</button>
+        </div>
+
+        <!-- EXIF Data Display -->
+        <div id="exif-data" class="hidden mt-4" >
+            <h2 class="text-xl font-semibold mb-2">EXIF Data</h2>
+            <div class="grid grid-cols-5 gap-4" id="exif-cards"></div>
+        </div>
+
+    <div id="map" class="mt-6 " style="height: 400px;"></div>
+
+        <!-- Extracted Patterns Display -->
+        <div id="patterns-section" class="mt-6 hidden">
+            <h2 class="text-xl font-semibold">Extracted Patterns</h2>
+            <div id="patterns-data"></div>
+        </div>
+
+        <div id="color-table" class="mt-6 hidden">
+            <h2 class="text-xl font-semibold mb-2">Dominant Colors</h2>
+            <div id="color-data"></div>
+        </div>
+      
+        <div class="flex justify-end mt-4 gap-4 hidden" id="tools">
+            <button id="exportToExcel" class="bg-blue-500 text-white px-4 py-2 rounded">Export to Excel</button>
+            <button id="clearData" class="bg-red-500 text-white px-4 py-2 rounded">Clear</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    document.getElementById('uploadForm').addEventListener('submit', function(event) {
+        event.preventDefault();
+        
+        let fileInput = document.getElementById('fileInput');
+        let file = fileInput.files[0];
+        if (!file) return;
+    
+        let formData = new FormData();
+        formData.append('file', file);
+    
+        fetch('/upload', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert(data.error);
+                return;
+            }
+    
+            displayExifData(data);
+            displayUploadedImage(data.filename);
+        })
+        .catch(error => console.error('Error:', error));
+    });
+    
+    function displayUploadedImage(filename) {
+        let uploadedImage = document.getElementById('uploadedImage');
+        uploadedImage.src = `/static/uploads/${filename}`;
+        uploadedImage.classList.remove('hidden');
+        document.getElementById('image-container').classList.remove('hidden');
+
+        // Show ROI section after image is uploaded
+        document.getElementById('roi-section').classList.remove('hidden');
+        
+        initCropper();
+    }
+    function displayExifData(exif) {
+        let exifSection = document.getElementById('exif-data');
+        let exifCards = document.getElementById('exif-cards');
+        let mapSection = document.getElementById('map');
+        exifCards.innerHTML = '';
+        mapSection.classList.add('hidden');  // Hide the map initially
+    
+        // Display latitude and longitude if available
+        let latitude = exif.latitude || 'N/A';
+        let longitude = exif.longitude || 'N/A';
+    
+        Object.keys(exif).forEach(key => {
+            let card = `<div class="p-4 border rounded-lg bg-gray-50">
+                            <h3 class="font-semibold capitalize">${key}</h3>
+                            <p>${exif[key]}</p>
+                        </div>`;
+            exifCards.innerHTML += card;
+        });
+    
+        // Check if latitude and longitude are available
+        if (latitude !== 'N/A' && longitude !== 'N/A') {
+            initMap(latitude, longitude);
+        } else {
+            // Display "No location found" message
+            mapSection.innerHTML = `<div class="border p-4 rounded-lg bg-gray-50">
+                                        <p class="text-center text-gray-500">No location found.</p>
+                                    </div>`;
+            mapSection.classList.remove('hidden');  // Show the message
+        }
+    
+        exifSection.classList.remove('hidden');
+    }
+    
+    function initMap(latitude, longitude) {
+        let map = L.map('map').setView([latitude, longitude], 13);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+        }).addTo(map);
+    
+        L.marker([latitude, longitude]).addTo(map);
+    
+        // Show the map section
+        document.getElementById('map').classList.remove('hidden');
+    }
+    
+    
+    let cropper;
+    function initCropper() {
+        let imageElement = document.getElementById('uploadedImage');
+        
+        cropper = new Cropper(imageElement, {
+            viewMode: 1,
+            zoomable: true,
+            scalable: true,
+            crop(event) {
+                // Get coordinates of the cropped area
+            }
+        });
+    
+        document.getElementById('zoomIn').addEventListener('click', () => cropper.zoom(0.1));
+        document.getElementById('zoomOut').addEventListener('click', () => cropper.zoom(-0.1));
+    
+        document.getElementById('extractPatterns').addEventListener('click', extractPatterns);
+    }
+    
+    async function extractPatterns() {
+        let cropData = cropper.getData(true); // Get ROI coordinates
+    
+        const response = await fetch('/extract_patterns', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                filename: document.getElementById('uploadedImage').src.split('/').pop(),
+                roi: {
+                    x: cropData.x,
+                    y: cropData.y,
+                    width: cropData.width,
+                    height: cropData.height
+                }
+            })
+        });
+    
+        const data = await response.json(); // Read response once
+    
+        if (data.error) {
+            alert(data.error);
+            return;
+        }
+    
+        console.log(data); // Use the data here
+        await displayPatternData(data); // Pass the same data to displayPatternData
+    }
+    
+    async function displayPatternData(data) {
+      
+        let patternsSection = document.getElementById('patterns-section');
+        let patternsData = document.getElementById('patterns-data');
+        let exifCards = document.getElementById('color-data');
+    
+        // Display average color and other information
+        patternsData.innerHTML = `
+        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-2 gap-3">
+
+        <div class="p-4 border rounded-lg bg-gray-50 mt-4">
+            <h3 class="font-semibold">Average Color</h3>
+            <p>
+                <span style="background-color: rgb(${data.average_color.join(',')}); border-radius: 4px;">
+                    ${data.average_color.join(', ')}
+                </span>
+            </p>
+        </div>
+        <div class="p-4 border rounded-lg bg-gray-50 mt-4">
+            <h3 class="font-semibold">Common Color (Hex)</h3>
+            <p>${data.common_color.hex}</p>
+        </div>
+        <div class="p-4 border rounded-lg bg-gray-50 mt-4">
+            <h3 class="font-semibold">Area (in square meters)</h3>
+            <p>${data.area_square_meters}</p>
+        </div>
+        <div class="p-4 border rounded-lg bg-gray-50 mt-4">
+            <h3 class="font-semibold">Area (in Pixels)</h3>
+            <p>${data.area_pixels}</p>
+        </div>
+         <div class="p-4 border rounded-lg bg-gray-50 mt-4">
+            <h3 class="font-semibold">Breadth (in meters)</h3>
+            <p>${data.breadth}</p>
+        </div>
+         <div class="p-4 border rounded-lg bg-gray-50 mt-4">
+            <h3 class="font-semibold">Breadth (in pixels)</h3>
+            <p>${data.breadth_in_pixels}</p>
+        </div>
+       
+       
+        <div class="p-4 border rounded-lg bg-gray-50 mt-4">
+            <h3 class="font-semibold">Length (in meters)</h3>
+            <p>${data.length}</p>
+        </div>
+         <div class="p-4 border rounded-lg bg-gray-50 mt-4">
+            <h3 class="font-semibold">Length (in pixels)</h3>
+            <p>${data.length_in_pixels}</p>
+        </div>
+      </div>
+        <div class="mt-4">
+            <img src="${data.roi_image_path}" class="border rounded-lg w-[200px] h-[200px]">
+        </div></div>
+    `;
+    
+
+        // Clear existing color cards before adding new ones
+        exifCards.innerHTML = '';
+    
+        const tableHeader = `
+        <table class="table-auto w-full border-collapse">
+            <thead class="bg-gray-200">
+                <tr>
+                    <th class="px-4 py-2 border">Color</th>
+                    <th class="px-4 py-2 border">Hex</th>
+                    <th class="px-4 py-2 border">RGB</th>
+                    <th class="px-4 py-2 border">Stencil</th>
+
+                </tr>
+            </thead>
+            <tbody>
+    `;
+    
+    let tableRows = '';
+    
+    // Loop through dominant colors and create table rows
+    data.dominant_colors.forEach(color => {
+        tableRows += `
+            <tr class="hover:bg-gray-100 transition duration-300">
+                <td style="background-color: rgb(${color.rgb.join(',')}); padding: 5px; border: 1px solid #ddd;"></td>
+                <td class="border px-4 py-2 text-center">${color.hex}</td>
+                <td class="border px-4 py-2 text-center">rgb(${color.rgb.join(', ')})</td>
+<td class="border px-4 py-2 text-center">
+                <img src="data:image/png;base64,${color.stencil_image}" alt="Stencil Image" style="width: 400px; height: 200px;">
+            </td>
+
+            </tr>
+        `;
+    });
+    
+    // Combine header, rows, and footer to form the complete table
+    const tableFooter = `
+            </tbody>
+        </table>
+    `;
+    
+    // Combine everything to create the complete table HTML
+  exifCards.innerHTML = tableHeader + tableRows + tableFooter;
+
+ 
+
+    
+        // Remove hidden class to display the section
+        patternsSection.classList.remove('hidden');
+        document.getElementById('color-table').classList.remove('hidden');
+        document.getElementById('tools').classList.remove('hidden');
+
+
+    }
+    
+
+    function exportToExcel() {
+        const patternsData = {
+            average_color: document.getElementById('patterns-data').querySelector('div').innerText,
+            common_color: document.getElementById('patterns-data').querySelectorAll('div')[1].innerText,
+            area_square_meters: document.getElementById('patterns-data').querySelectorAll('div')[2].innerText,
+            area_pixels: document.getElementById('patterns-data').querySelectorAll('div')[3].innerText,
+            breadth: document.getElementById('patterns-data').querySelectorAll('div')[4].innerText,
+            breadth_in_pixels: document.getElementById('patterns-data').querySelectorAll('div')[5].innerText,
+            length: document.getElementById('patterns-data').querySelectorAll('div')[6].innerText,
+            length_in_pixels: document.getElementById('patterns-data').querySelectorAll('div')[7].innerText,
+            dominant_colors: Array.from(document.querySelectorAll('#color-data tr')).map(row => ({
+                hex: row.cells[1].innerText,
+                rgb: row.cells[2].innerText,
+                stencil_image: row.cells[3].querySelector('img').src // Get the stencil image source
+            })),
+        };
+    
+        // Create a new workbook
+        const wb = XLSX.utils.book_new();
+    
+        // Prepare data for patterns data sheet
+        const patternsSheetData = [
+            [
+                'Merged Color Information', 
+                'Area (m²)', 
+                'Area (pixels)', 
+                'Breadth', 
+                'Breadth (pixels)', 
+                'Length', 
+                'Length (pixels)'
+            ],
+            [
+                `${patternsData.average_color} / ${patternsData.common_color}`,
+                patternsData.area_square_meters,
+                patternsData.area_pixels,
+                patternsData.breadth,
+                patternsData.breadth_in_pixels,
+                patternsData.length,
+                patternsData.length_in_pixels
+            ]
+        ];
+    
+        // Create a worksheet from patterns data
+        const patternsSheet = XLSX.utils.aoa_to_sheet(patternsSheetData);
+        XLSX.utils.book_append_sheet(wb, patternsSheet, 'Patterns Data');
+    
+        // Prepare data for dominant colors sheet
+        const colorSheetData = [
+            ['Color', 'Hex', 'RGB', 'Stencil Image']
+        ];
+    
+        // Fill the color data into the array
+        patternsData.dominant_colors.forEach(color => {
+            // Ensure hex is formatted correctly
+            const hexColor = color.hex.replace('#', '');
+            
+            // Create a cell with color fill and add stencil image as text or base64
+            colorSheetData.push([
+                { v: '', s: { fill: { patternType: 'solid', fgColor: { rgb: hexColor } } } }, // Cell with color fill
+                color.hex,
+                color.rgb, // Ensure RGB is a string, e.g., "255, 0, 0"
+                color.stencil_image // Include stencil image source or base64 string
+            ]);
+        });
+    
+        // Create a worksheet from dominant colors data
+        const colorSheet = XLSX.utils.aoa_to_sheet(colorSheetData);
+    
+        // Set column width for better visibility (optional)
+        colorSheet['!cols'] = [
+            { wpx: 50 },  // Width for Color column
+            { wpx: 100 }, // Width for Hex column
+            { wpx: 100 }, // Width for RGB column
+            { wpx: 200 }  // Width for Stencil Image column
+        ];
+    
+        // Append the color sheet to the workbook
+        XLSX.utils.book_append_sheet(wb, colorSheet, 'Dominant Colors');
+    
+        // Generate Excel file and trigger download
+        XLSX.writeFile(wb, 'Patterns_Colors_Data.xlsx');
+    }
+    // Function to clear all data
+    function clearData() {
+        // Clear the uploaded image
+        document.getElementById('uploadedImage').src = '';
+        document.getElementById('uploadedImage').classList.add('hidden');
+
+        // Clear the ROI section
+        document.getElementById('roi-section').classList.add('hidden');
+
+        // Clear EXIF data
+        document.getElementById('exif-cards').innerHTML = '';
+        document.getElementById('exif-data').classList.add('hidden');
+
+        // Clear extracted patterns
+        document.getElementById('patterns-data').innerHTML = '';
+        document.getElementById('patterns-section').classList.add('hidden');
+        document.getElementById('color-data').innerHTML = '';
+        document.getElementById('color-table').classList.add('hidden');
+        document.getElementById('map').classList.add('hidden');
+
+        // Reset Cropper
+        if (cropper) {
+            cropper.destroy();
+            cropper = null;
+        }
+    }
+
+    // Event listeners for the buttons
+    document.getElementById('exportToExcel').addEventListener('click', exportToExcel);
+    document.getElementById('clearData').addEventListener('click', clearData);
+</script>
+
+</body>
+</html>
