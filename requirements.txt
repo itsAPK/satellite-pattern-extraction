@@ -26,5 +26,5 @@ scikit-learn==1.5.2
 scipy==1.13.1
 six==1.16.0
 threadpoolctl==3.5.0
-Werkzeug==2.2.2
+Werkzeug==3.0.6
 zipp==3.20.2
