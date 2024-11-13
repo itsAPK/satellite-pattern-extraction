@@ -1,6 +1,4 @@
-import datetime
 import io
-import warnings
 from flask import Flask, request, jsonify, render_template
 import cv2
 import numpy as np
@@ -9,15 +7,11 @@ from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
 from fractions import Fraction
 import base64
-import openpyxl
-from sklearn.cluster import KMeans
-from kneed import KneeLocator
+from sklearn.cluster import KMeans, MiniBatchKMeans
 from werkzeug.utils import secure_filename
 from sklearn.utils import shuffle
-from sklearn.cluster import MiniBatchKMeans
 import pandas as pd
 from openpyxl.drawing.image import Image as OpenPyXLImage
-from pathlib import Path
 from openpyxl.styles import PatternFill
 
 app = Flask(__name__)
@@ -38,7 +32,7 @@ def get_lat_lon_from_image(image_path):
         with rasterio.open(image_path) as src:
             # Get the bounding box of the image in geographic coordinates
             bounds = src.bounds
-            # Calculate the center point as an example
+            # Calculate the center point of the bounding box
             lat = (bounds.top + bounds.bottom) / 2
             lon = (bounds.left + bounds.right) / 2
             
@@ -173,7 +167,7 @@ def upload_image():
 
 
         # Get all EXIF data from the converted or original image
-        exif_data = get_exif_data(m)
+       # exif_data = get_exif_data(m)
 
         # Extract latitude and longitude if available
 
@@ -182,7 +176,7 @@ def upload_image():
             'filename': response_filename,
             'latitude': str(latitude) if latitude is not None else None,
             'longitude': str(longitude) if longitude is not None else None,
-            **exif_data  # Include serialized EXIF data
+            #**exif_data 
         }), 200
        
     except Exception as e:
@@ -247,6 +241,22 @@ def extract_patterns():
 
     image_path = os.path.join(UPLOAD_FOLDER, filename)
     image = cv2.imread(image_path)
+    
+    with rasterio.open(image_path) as src:
+        i = src.read()  # Read the image data
+        transform = src.transform  # Get the affine transform for coordinate conversion
+        
+        # Extract coordinates of the ROI corners
+        x_min, y_min = transform * (roi['x'], roi['y'])
+        x_max, y_max = transform * (roi['x'] + roi['width'], roi['y'] + roi['height'])
+
+        # Create a list of corner coordinates (longitude, latitude)
+        roi_corners = {
+            'top_left': (x_min, y_max),
+            'top_right': (x_max, y_max),
+            'bottom_left': (x_min, y_min),
+            'bottom_right': (x_max, y_min)
+        }
 
     x, y, width, height = roi['x'], roi['y'], roi['width'], roi['height']
     
@@ -254,6 +264,28 @@ def extract_patterns():
         return jsonify({'error': 'ROI is out of bounds.'}), 400
 
     roi_image = image[y:y + height, x:x + width]
+    
+    # Apply Gaussian filter and Canny edge detection on the ROI
+    gaussian_blurred = cv2.GaussianBlur(roi_image, (5, 5), 0)
+    edges = cv2.Canny(gaussian_blurred, 100, 200)
+
+    # Save processed images
+    gaussian_image_path = os.path.join(UPLOAD_FOLDER, f'gaussian_{filename}')
+    edges_image_path = os.path.join(UPLOAD_FOLDER, f'edges_{filename}')
+    
+    cv2.imwrite(gaussian_image_path, gaussian_blurred)
+    cv2.imwrite(edges_image_path, edges)
+
+    # Find contours from edges detected by Canny
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Draw contours on a blank image or the original ROI for visualization
+    contour_image = np.zeros_like(roi_image)
+    cv2.drawContours(contour_image, contours, -1, (0, 255, 0), 3)
+
+    # Save the contour image
+    contour_image_path = os.path.join(UPLOAD_FOLDER, f'contours_{filename}')
+    cv2.imwrite(contour_image_path, contour_image)
 
     if roi_image.size > 0:
         roi_image_processed = preprocess_roi(roi_image)
@@ -360,7 +392,12 @@ def extract_patterns():
             'length_in_pixels': height,
             'breadth': breadth,
             'length': length,
-            'excel_path': excel_path.replace('\\', '/')  # Return the path of the Excel file
+            'gaussian_image_path': gaussian_image_path.replace('\\', '/'),
+            'edges_image_path': edges_image_path.replace('\\', '/'),
+            'contour_image_path': contour_image_path.replace('\\', '/'),
+            'excel_path': excel_path.replace('\\', '/') , # Return the path of the Excel file
+            'roi_corners': roi_corners  # Return the corners of the ROI
+
         }), 200
 
 def preprocess_roi(roi_image):
@@ -374,132 +411,139 @@ def preprocess_roi(roi_image):
     return cv2.filter2D(roi_image_resized, -1, sharpening_kernel)
 
 
- # Adjust this based on your image scale
+def process_contour(contour, roi_image, dominant_color, stencil_image):
+    # Create mask for the contour
+    contour_mask = np.zeros_like(roi_image, dtype=np.uint8)
+    cv2.drawContours(contour_mask, [contour], -1, (255, 255, 255), thickness=cv2.FILLED)
+    
+    # Calculate mean color inside the contour
+    mean_color = cv2.mean(roi_image, mask=contour_mask[:, :, 0])[:3]
+    mean_color_int = np.array(mean_color).astype(int)
 
-def rgb_to_hex(rgb):
-    """Convert RGB to HEX format."""
-    return '#{:02x}{:02x}{:02x}'.format(rgb[0], rgb[1], rgb[2])
+    # If the mean color inside the contour matches the dominant color, fill it
+    if np.allclose(mean_color_int, dominant_color, atol=30):
+        cv2.drawContours(stencil_image, [contour], -1, dominant_color.tolist(), thickness=cv2.FILLED)
+
 
 def analyze_colors(roi_image):
     """Analyze colors in the ROI using KMeans clustering and return stencil images for each dominant color."""
-    stencil_dir = os.path.join(UPLOAD_FOLDER, 'stencils')
+    stencil_dir = UPLOAD_FOLDER + '/stencils'
     os.makedirs(stencil_dir, exist_ok=True)
-
-
+    print(f"Stencil directory created at: {stencil_dir}")
+    
     # Downsample the image to reduce the number of pixels
-    downsample_factor = 4
-    small_roi_image = roi_image[::downsample_factor, ::downsample_factor]
+    downsample_factor = 8
+    small_roi_image = cv2.resize(roi_image, (roi_image.shape[1] // downsample_factor, roi_image.shape[0] // downsample_factor))
+    print(f"Downsampled image shape: {small_roi_image.shape}")
+    
+    # Reshape the image into a 2D array of pixels and shuffle them for clustering
+    pixels = shuffle(small_roi_image.reshape(-1, 3))
+    print(f"Pixels reshaped for clustering: {pixels.shape}")
+    
+    # Use MiniBatchKMeans for faster clustering
+    kmeans = MiniBatchKMeans(n_clusters=4, init='k-means++', batch_size=1000)
+    kmeans.fit(pixels)
+    print(f"KMeans clustering completed. Cluster centers (dominant colors): {kmeans.cluster_centers_}")
 
-    # Reshape the image into a 2D array of pixels
-    pixels = small_roi_image.reshape(-1, 3)
+    # Extract cluster centers as dominant colors
+    dominant_colors_rgb = kmeans.cluster_centers_.astype(int)
+    labels = kmeans.labels_
+    print(f"Dominant colors RGB: {dominant_colors_rgb}")
+    
+    # Prepare blank image for showing dominant color patterns
+    filled_shapes_image = np.zeros_like(roi_image)
+    
+    # Convert to grayscale, apply Gaussian blur, and threshold for contour detection
+    gray_roi_image = cv2.cvtColor(roi_image, cv2.COLOR_BGR2GRAY)
+    print(f"Converted ROI to grayscale.")
+    
+    blurred_roi_image = cv2.GaussianBlur(gray_roi_image, (3, 3), 0)
+    print(f"Applied Gaussian blur.")
+    
+    _, thresh = cv2.threshold(blurred_roi_image, 127, 255, cv2.THRESH_BINARY)
+    print(f"Threshold applied. Binary image shape: {thresh.shape}")
+    
+    # Morphological opening to remove noise
+    kernel = np.ones((3, 3), np.uint8)
+    cleaned_thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+    print(f"Cleaned threshold image with morphological opening.")
 
-    # Shuffle pixels for better clustering
-    pixels = shuffle(pixels)
-    print("pixels shape:", pixels.shape)
+    # Find contours on the binary image
+    contours, _ = cv2.findContours(cleaned_thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    print(f"Found contours: {len(contours)}")
 
-    # Set a dynamic maximum number of clusters based on unique pixels
-    unique_colors = np.unique(pixels, axis=0)
-    print("unique_colors:", unique_colors)
-    max_clusters = min(len(unique_colors), 5)  # Limit to 5 or the number of unique colors
-    print("max_clusters:", max_clusters)
-
-    inertias = []
-
-    # Use KMeans for clustering
-    for n_clusters in range(1, max_clusters + 1):
-        kmeans = KMeans(n_clusters=n_clusters, init='k-means++', random_state=42)
-        kmeans.fit(pixels)
-        inertias.append(kmeans.inertia_)
-        print(f"Inertia for {n_clusters} clusters: {kmeans.inertia_}")
-
-    # Determine the optimal number of clusters using the Elbow method
-    if len(inertias) > 1:
-        optimal_n_clusters = np.argmax(np.diff(inertias)) + 1
-    else:
-        optimal_n_clusters = 1  # Default to 1 if there's not enough data
-
-    print("optimal_n_clusters:", optimal_n_clusters)
-
-    # Fit final model with optimal number of clusters
-    kmeans_final = KMeans(n_clusters=optimal_n_clusters, init='k-means++', random_state=42)
-    kmeans_final.fit(pixels)
-
-    # Extract all cluster centers as dominant colors
-    dominant_colors_rgb = kmeans_final.cluster_centers_.astype(int)
-
-    # Labels of each pixel in the cluster
-    labels = kmeans_final.labels_
-
-    # Create a color representation image where dominant colors are shown
-    color_representation_image = np.zeros_like(roi_image)
-
-    # Create color info list with all dominant colors and base64-encoded stencil images
     color_info_list = []
+
     for i, dominant_color in enumerate(dominant_colors_rgb):
-        # Create a mask for the current color
-        # Create the mask and resize it to the original ROI dimensions
+        print(f"Processing dominant color {i}: {dominant_color}")
+        
+        # Create mask for the current color based on KMeans labels
         mask = (labels == i).reshape(small_roi_image.shape[:2])
         mask_resized = cv2.resize(mask.astype(np.uint8), (roi_image.shape[1], roi_image.shape[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
+        
+        # Create a blank image for drawing contours of this dominant color
+        dominant_color_filled_image =np.zeros_like(roi_image, dtype=np.uint8)  # White background
 
-        # Create a blank (black) image for the stencil
-        stencil_image_pixels = np.zeros_like(roi_image)
+        # Vectorized contour processing
+        for contour in contours:
+            # Create mask for the contour
+            contour_mask = np.zeros_like(roi_image, dtype=np.uint8)
+            cv2.drawContours(contour_mask, [contour], -1, (255, 255, 255), thickness=cv2.FILLED)
+            # Calculate mean color inside the contour
+            mean_color = cv2.mean(roi_image, mask=contour_mask[:, :, 0])[:3]
+            mean_color_int = np.array(mean_color).astype(int)
+            print(f"Mean color inside contour: {mean_color_int}")
+            
+            # If the mean color inside the contour matches the dominant color, fill it
+            if np.allclose(mean_color_int, dominant_color, atol=30):  # Tolerance to account for color variations
+                cv2.drawContours(dominant_color_filled_image, [contour], -1, dominant_color.tolist(), thickness=cv2.FILLED)
 
-        # Apply the dominant color to the areas specified by the resized mask
-        stencil_image_pixels[mask_resized] = dominant_color
-
-        # Convert the stencil image to a PIL image and resize it to the original ROI size
-        stencil_image = Image.fromarray(stencil_image_pixels.astype('uint8'))
-        stencil_image = stencil_image.resize((roi_image.shape[1], roi_image.shape[0]), Image.NEAREST)
-
+        # Save contour image for this dominant color
         stencil_image_path = os.path.join(stencil_dir, f'stencil_{i}.png')
-        stencil_image.save(stencil_image_path)
-        # Convert the stencil image to base64 for JSON response
-        buffered = io.BytesIO()
-        stencil_image.save(buffered, format="PNG")
-        stencil_image_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        contour_pil = Image.fromarray(dominant_color_filled_image.astype('uint8'))
+        
+        try:
+            contour_pil.save(stencil_image_path)
+            print(f"Saved stencil image at: {stencil_image_path}")
+        except Exception as e:
+            print(f"Error saving stencil image: {e}")
 
-        # Add this stencil image and color info to the list
+        # Convert filled shapes image to base64 for JSON response (optional)
+        buffered = io.BytesIO()
+        contour_pil.save(buffered, format="PNG")
+        filled_shapes_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+        # Add color info to list
         color_info_list.append({
             'rgb': dominant_color.tolist(),
             'hex': rgb_to_hex(dominant_color),
-            'stencil_image': stencil_image_base64 ,
-            'path' : stencil_image_path.replace('\\', '/') # Base64 encoded image
+            'stencil_image': filled_shapes_base64,
+            'path': stencil_image_path.replace('\\', '/'),
+            'contours': []
         })
-        
-    labels = kmeans_final.labels_
 
-    # Count occurrences of each label (color)
+    # Count occurrences of each label to find the most common color
     label_counts = np.bincount(labels)
-    
-
     common_color_index = np.argmax(label_counts)
-    
-    # Get the RGB value of the most common color
     common_color_rgb = dominant_colors_rgb[common_color_index]
-
-    # Convert RGB to Hex
     common_color_hex = rgb_to_hex(common_color_rgb)
+
     common_color = {
         'rgb': common_color_rgb.tolist(),
         'hex': common_color_hex
     }
+    print(f"Common color found: {common_color}")
 
-    # Calculate area in square meters
+    # Calculate area and dimensions
     area_square_meters = (roi_image.shape[0] * roi_image.shape[1]) / (PIXELS_PER_METER ** 2)
+    width = roi_image.shape[1] / PIXELS_PER_METER
+    height = roi_image.shape[0] / PIXELS_PER_METER
 
-    # Calculate average color
     avg_color_rgb_intensity = np.mean(dominant_colors_rgb, axis=0).astype(int).tolist()
+    print(f"Average RGB intensity: {avg_color_rgb_intensity}")
 
-    # Calculate dimensions in pixels
-    width = roi_image.shape[1]  # Width of the ROI in pixels
-    height = roi_image.shape[0]  # Height of the ROI in pixels
+    return color_info_list, area_square_meters, avg_color_rgb_intensity, width, height, filled_shapes_image, common_color
 
-    # Convert dimensions to meters
-    breadth = width / PIXELS_PER_METER  # Convert width from pixels to meters
-    length = height / PIXELS_PER_METER 
-
-    # Return the color representation image and other details
-    return color_info_list, area_square_meters, avg_color_rgb_intensity, breadth, length, color_representation_image,common_color
 
 
 def find_optimal_n_clusters(inertias):

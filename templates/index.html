@@ -52,6 +52,26 @@
             <div id="patterns-data"></div>
         </div>
 
+        <div id="proceedure" class='grid grid-cols-3 gap-4 hidden py-5'>
+            <div>
+                <h2 class="text-xl font-semibold">Gaussian Filtering</h2>
+                <div id="gaussian-image">
+
+            </div></div>
+                <div>
+                    <h2 class="text-xl font-semibold">Canny's Edge Detection </h2>
+                    <div id="canny-image">
+    
+                    </div>
+            </div>
+            <div>
+                <h2 class="text-xl font-semibold">Contour Detection </h2>
+                <div id="contour-image">
+
+                </div>
+        </div>
+        </div>
+
         <div id="color-table" class="mt-6 hidden">
             <h2 class="text-xl font-semibold mb-2">Dominant Colors</h2>
             <div id="color-data"></div>
@@ -140,7 +160,7 @@
         let map = L.map('map').setView([latitude, longitude], 13);
         
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 19,
+            maxZoom: 0,
         }).addTo(map);
     
         L.marker([latitude, longitude]).addTo(map);
@@ -202,7 +222,13 @@
         let patternsSection = document.getElementById('patterns-section');
         let patternsData = document.getElementById('patterns-data');
         let exifCards = document.getElementById('color-data');
-    
+        let proceedure = document.getElementById('proceedure');
+        let gaussianImage = document.getElementById('gaussian-image');
+        let cannyImage = document.getElementById('canny-image');
+        let contourImage = document.getElementById('contour-image');
+        cannyImage.innerHTML = `<img src="${data.edges_image_path}" alt="Canny Image" style="width: 400px; height: auto;">`;
+        gaussianImage.innerHTML = `<img src="${data.gaussian_image_path}" alt="Gaussian Image" style="width: 400px; height: auto;">`;
+    contourImage.innerHTML = `<img src="${data.contour_image_path}" alt="Contour Image" style="width: 400px; height: auto;">`;
         // Display average color and other information
         patternsData.innerHTML = `
         <div class="grid grid-cols-2 gap-3">
@@ -246,6 +272,10 @@
             <h3 class="font-semibold">Length (in pixels)</h3>
             <p>${data.length_in_pixels}</p>
         </div>
+        <div class="p-4 border rounded-lg bg-gray-50 mt-4">
+            <h3 class="font-semibold">Co-ordinates of ROI</h3>
+            <p>N/A</p>
+        </div>
       </div>
         <div class="mt-4">
             <img src="${data.roi_image_path}" class="border rounded-lg w-[200px] h-[200px]">
@@ -280,7 +310,7 @@
                 <td class="border px-4 py-2 text-center">${color.hex}</td>
                 <td class="border px-4 py-2 text-center">rgb(${color.rgb.join(', ')})</td>
 <td class="border px-4 py-2 text-center">
-                <img src="data:image/png;base64,${color.stencil_image}" alt="Stencil Image" style="width: 400px; height: 200px;">
+                <img src="${color.path}" alt="Stencil Image" style="width: 400px; height: auto;">
             </td>
 
             </tr>
@@ -303,6 +333,7 @@
         patternsSection.classList.remove('hidden');
         document.getElementById('color-table').classList.remove('hidden');
         document.getElementById('tools').classList.remove('hidden');
+        proceedure.classList.remove('hidden');
 
 
     }
