@@ -295,7 +295,7 @@ def extract_patterns():
         roi_image_path = os.path.join(UPLOAD_FOLDER, roi_image_filename)
         cv2.imwrite(roi_image_path, roi_image_processed)
 
-        color_info, area_square_meters, avg_color_rgb, breadth, length, color_representation_image, common_color = analyze_colors(roi_image_processed)
+        color_info, area_square_meters, avg_color_rgb, breadth, length, combined_path, common_color, surface_color_path, surface_color_base64 = analyze_colors(roi_image_processed)
 
         # Save stencil images and update paths
         dominant_colors = []
@@ -396,7 +396,10 @@ def extract_patterns():
             'edges_image_path': edges_image_path.replace('\\', '/'),
             'contour_image_path': contour_image_path.replace('\\', '/'),
             'excel_path': excel_path.replace('\\', '/') , # Return the path of the Excel file
-            'roi_corners': roi_corners  # Return the corners of the ROI
+            'roi_corners': roi_corners,
+            'combined_path': combined_path.replace('\\', '/'),
+            "surface_color_path" : surface_color_path.replace('\\', '/'),
+            
 
         }), 200
 
@@ -411,140 +414,137 @@ def preprocess_roi(roi_image):
     return cv2.filter2D(roi_image_resized, -1, sharpening_kernel)
 
 
-def process_contour(contour, roi_image, dominant_color, stencil_image):
-    # Create mask for the contour
-    contour_mask = np.zeros_like(roi_image, dtype=np.uint8)
-    cv2.drawContours(contour_mask, [contour], -1, (255, 255, 255), thickness=cv2.FILLED)
-    
-    # Calculate mean color inside the contour
-    mean_color = cv2.mean(roi_image, mask=contour_mask[:, :, 0])[:3]
-    mean_color_int = np.array(mean_color).astype(int)
-
-    # If the mean color inside the contour matches the dominant color, fill it
-    if np.allclose(mean_color_int, dominant_color, atol=30):
-        cv2.drawContours(stencil_image, [contour], -1, dominant_color.tolist(), thickness=cv2.FILLED)
+def compute_surface_color(roi_image):
+    """Calculate the average color (surface color) of the entire ROI."""
+    # Compute the average color of the ROI image
+    mean_color = np.mean(roi_image, axis=(0, 1))  # Average over all pixels
+    return mean_color.astype(int)
 
 
-def analyze_colors(roi_image):
-    """Analyze colors in the ROI using KMeans clustering and return stencil images for each dominant color."""
-    stencil_dir = UPLOAD_FOLDER + '/stencils'
-    os.makedirs(stencil_dir, exist_ok=True)
-    print(f"Stencil directory created at: {stencil_dir}")
-    
-    # Downsample the image to reduce the number of pixels
-    downsample_factor = 8
-    small_roi_image = cv2.resize(roi_image, (roi_image.shape[1] // downsample_factor, roi_image.shape[0] // downsample_factor))
-    print(f"Downsampled image shape: {small_roi_image.shape}")
-    
-    # Reshape the image into a 2D array of pixels and shuffle them for clustering
-    pixels = shuffle(small_roi_image.reshape(-1, 3))
-    print(f"Pixels reshaped for clustering: {pixels.shape}")
-    
-    # Use MiniBatchKMeans for faster clustering
-    kmeans = MiniBatchKMeans(n_clusters=4, init='k-means++', batch_size=1000)
+PIXELS_PER_METER = 100  # Example value; replace with the actual scaling factor if known.
+def create_contour_mask(contour, image_shape):
+    """Create a binary mask for a given contour with the same dimensions as the input image."""
+    # Ensure shape is valid and extract only the (height, width)
+    if isinstance(image_shape, tuple) and len(image_shape) >= 2:
+        mask_shape = (int(image_shape[0]), int(image_shape[1]))  # Ensure these are integers
+    else:
+        raise ValueError("image_shape must be a tuple with at least two dimensions (height, width).")
+
+    # Create the mask with the correct shape
+    mask = np.zeros(mask_shape, dtype=np.uint8)
+    cv2.drawContours(mask, [contour], -1, 255, thickness=cv2.FILLED)
+    return mask
+
+def process_stencil_for_color(contours, roi_image, dominant_color):
+    """Generate a stencil image for a specific dominant color by filling contours that match this color."""
+    stencil_image = np.zeros_like(roi_image)
+    for contour in contours:
+        # Pass the shape of the image to ensure the mask dimensions match the input image
+        contour_mask = create_contour_mask(contour, roi_image.shape)
+        mean_color = cv2.mean(roi_image, mask=contour_mask)[:3]
+        
+        if np.allclose(np.array(mean_color).astype(int), dominant_color, atol=30):
+            cv2.drawContours(stencil_image, [contour], -1, dominant_color.tolist(), thickness=cv2.FILLED)
+    return stencil_image
+
+def rgb_to_hex(rgb):
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+def analyze_colors(roi_image, k=4):
+    """Analyze colors in the ROI, generate and save stencils for each dominant color."""
+    stencil_dir = "stencils"
+    os.makedirs(f"{UPLOAD_FOLDER}/{stencil_dir}", exist_ok=True)
+    print(f"Analyzing colors in {roi_image.shape}")
+    # Resize for faster processing
+    downsampled_image = cv2.resize(roi_image, (roi_image.shape[1] // 8, roi_image.shape[0] // 8))
+    pixels = downsampled_image.reshape(-1, 3)
+    print(f"Pixels shape: {pixels.shape}")
+    # Cluster colors with KMeans
+    kmeans = MiniBatchKMeans(n_clusters=k, init='k-means++', batch_size=1000)
     kmeans.fit(pixels)
-    print(f"KMeans clustering completed. Cluster centers (dominant colors): {kmeans.cluster_centers_}")
+    dominant_colors = kmeans.cluster_centers_.astype(int)
+    print(f"Dominant colors: {dominant_colors}")
 
-    # Extract cluster centers as dominant colors
-    dominant_colors_rgb = kmeans.cluster_centers_.astype(int)
-    labels = kmeans.labels_
-    print(f"Dominant colors RGB: {dominant_colors_rgb}")
+    # Prepare the image for contour detection
+    gray_image = cv2.cvtColor(roi_image, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(cv2.GaussianBlur(gray_image, (3, 3), 0), 127, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    print(f"Contours: {contours}")
     
-    # Prepare blank image for showing dominant color patterns
-    filled_shapes_image = np.zeros_like(roi_image)
-    
-    # Convert to grayscale, apply Gaussian blur, and threshold for contour detection
-    gray_roi_image = cv2.cvtColor(roi_image, cv2.COLOR_BGR2GRAY)
-    print(f"Converted ROI to grayscale.")
-    
-    blurred_roi_image = cv2.GaussianBlur(gray_roi_image, (3, 3), 0)
-    print(f"Applied Gaussian blur.")
-    
-    _, thresh = cv2.threshold(blurred_roi_image, 127, 255, cv2.THRESH_BINARY)
-    print(f"Threshold applied. Binary image shape: {thresh.shape}")
-    
-    # Morphological opening to remove noise
-    kernel = np.ones((3, 3), np.uint8)
-    cleaned_thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-    print(f"Cleaned threshold image with morphological opening.")
+    # Calculate the surface color of the ROI (average color)
+    surface_color = compute_surface_color(roi_image)
+    print(f"Surface color: {surface_color}")
 
-    # Find contours on the binary image
-    contours, _ = cv2.findContours(cleaned_thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    print(f"Found contours: {len(contours)}")
+    # Create an image filled with the surface color
+    surface_color_image = np.ones_like(roi_image) * 255  # White background
+    surface_color_image[:, :] = surface_color 
+    print(f"Surface color image: {surface_color_image.shape}")
 
+    # Generate stencils for each dominant color
     color_info_list = []
-
-    for i, dominant_color in enumerate(dominant_colors_rgb):
-        print(f"Processing dominant color {i}: {dominant_color}")
+    combined_image = surface_color_image.copy()  # Start with the surface color background
+    
+    for i, dominant_color in enumerate(dominant_colors):
+        # Process stencil for each dominant color
+        stencil_image = process_stencil_for_color(contours, roi_image, dominant_color)
+        print(f"Stencil image shape: {stencil_image.shape}")
+        print(i)
         
-        # Create mask for the current color based on KMeans labels
-        mask = (labels == i).reshape(small_roi_image.shape[:2])
-        mask_resized = cv2.resize(mask.astype(np.uint8), (roi_image.shape[1], roi_image.shape[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
-        
-        # Create a blank image for drawing contours of this dominant color
-        dominant_color_filled_image =np.zeros_like(roi_image, dtype=np.uint8)  # White background
+        # Overlay stencil on the combined image
+        # We ensure that the surface color is kept for areas without stencils
+        mask = stencil_image == dominant_color  # Where stencil matches dominant color
+        combined_image[mask] = stencil_image[mask]  # Apply stencil color on the surface image
 
-        # Vectorized contour processing
-        for contour in contours:
-            # Create mask for the contour
-            contour_mask = np.zeros_like(roi_image, dtype=np.uint8)
-            cv2.drawContours(contour_mask, [contour], -1, (255, 255, 255), thickness=cv2.FILLED)
-            # Calculate mean color inside the contour
-            mean_color = cv2.mean(roi_image, mask=contour_mask[:, :, 0])[:3]
-            mean_color_int = np.array(mean_color).astype(int)
-            print(f"Mean color inside contour: {mean_color_int}")
-            
-            # If the mean color inside the contour matches the dominant color, fill it
-            if np.allclose(mean_color_int, dominant_color, atol=30):  # Tolerance to account for color variations
-                cv2.drawContours(dominant_color_filled_image, [contour], -1, dominant_color.tolist(), thickness=cv2.FILLED)
+        # Save each stencil as an image file (for debugging)
+        # stencil_path = os.path.join(f"{UPLOAD_FOLDER}/{stencil_dir}", f'stencil_{i}.png')
+        # Image.fromarray(stencil_image).save(stencil_path)
+        # Save each stencil as an image file
+        stencil_path = os.path.join(f"{UPLOAD_FOLDER}/{stencil_dir}", f'stencil_{i}.png')
+        Image.fromarray(stencil_image).save(stencil_path)
+        print(f"Stencil saved to {stencil_path}")
 
-        # Save contour image for this dominant color
-        stencil_image_path = os.path.join(stencil_dir, f'stencil_{i}.png')
-        contour_pil = Image.fromarray(dominant_color_filled_image.astype('uint8'))
-        
-        try:
-            contour_pil.save(stencil_image_path)
-            print(f"Saved stencil image at: {stencil_image_path}")
-        except Exception as e:
-            print(f"Error saving stencil image: {e}")
-
-        # Convert filled shapes image to base64 for JSON response (optional)
+        # Encode image for potential use in JSON
         buffered = io.BytesIO()
-        contour_pil.save(buffered, format="PNG")
-        filled_shapes_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        Image.fromarray(stencil_image).save(buffered, format="PNG")
+        stencil_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-        # Add color info to list
         color_info_list.append({
             'rgb': dominant_color.tolist(),
             'hex': rgb_to_hex(dominant_color),
-            'stencil_image': filled_shapes_base64,
-            'path': stencil_image_path.replace('\\', '/'),
-            'contours': []
+            'stencil_image': stencil_base64,
+            'path': stencil_path.replace('\\', '/')
         })
 
-    # Count occurrences of each label to find the most common color
-    label_counts = np.bincount(labels)
-    common_color_index = np.argmax(label_counts)
-    common_color_rgb = dominant_colors_rgb[common_color_index]
-    common_color_hex = rgb_to_hex(common_color_rgb)
+    # Save the surface color image and combined image
+    surface_color_path = os.path.join(f"{UPLOAD_FOLDER}/{stencil_dir}", 'surface_color.png')
+    Image.fromarray(surface_color_image).save(surface_color_path)
 
-    common_color = {
-        'rgb': common_color_rgb.tolist(),
-        'hex': common_color_hex
-    }
-    print(f"Common color found: {common_color}")
+    combined_path = os.path.join(f"{UPLOAD_FOLDER}/{stencil_dir}", 'combined_stencil.png')
+    Image.fromarray(combined_image).save(combined_path)
 
-    # Calculate area and dimensions
+    # Encode surface color image for potential use in JSON
+    surface_buffered = io.BytesIO()
+    Image.fromarray(surface_color_image).save(surface_buffered, format="PNG")
+    surface_color_base64 = base64.b64encode(surface_buffered.getvalue()).decode('utf-8')
+
+    # Calculate the area in square meters based on pixel density
     area_square_meters = (roi_image.shape[0] * roi_image.shape[1]) / (PIXELS_PER_METER ** 2)
+
+    # Calculate width and height in meters
     width = roi_image.shape[1] / PIXELS_PER_METER
     height = roi_image.shape[0] / PIXELS_PER_METER
 
-    avg_color_rgb_intensity = np.mean(dominant_colors_rgb, axis=0).astype(int).tolist()
-    print(f"Average RGB intensity: {avg_color_rgb_intensity}")
+    # Calculate average RGB intensity
+    avg_color_rgb_intensity = np.mean(dominant_colors, axis=0).astype(int).tolist()
 
-    return color_info_list, area_square_meters, avg_color_rgb_intensity, width, height, filled_shapes_image, common_color
+    # Determine the most common color
+    labels = kmeans.labels_
+    most_common_color_idx = np.argmax(np.bincount(labels))
+    common_color = {
+        'rgb': dominant_colors[most_common_color_idx].tolist(),
+        'hex': rgb_to_hex(dominant_colors[most_common_color_idx])
+    }
 
-
+    return color_info_list, area_square_meters, avg_color_rgb_intensity, width, height, combined_path, common_color, surface_color_path, surface_color_base64
 
 def find_optimal_n_clusters(inertias):
     # Calculate the first derivative (difference)
