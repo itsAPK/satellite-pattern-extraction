@@ -438,10 +438,12 @@ def create_contour_mask(contour, image_shape):
 def process_stencil_for_color(contours, roi_image, dominant_color):
     """Generate a stencil image for a specific dominant color by filling contours that match this color."""
     stencil_image = np.zeros_like(roi_image)
+    print(len(contours))
     for contour in contours:
         # Pass the shape of the image to ensure the mask dimensions match the input image
         contour_mask = create_contour_mask(contour, roi_image.shape)
         mean_color = cv2.mean(roi_image, mask=contour_mask)[:3]
+        print(mean_color)
         
         if np.allclose(np.array(mean_color).astype(int), dominant_color, atol=30):
             cv2.drawContours(stencil_image, [contour], -1, dominant_color.tolist(), thickness=cv2.FILLED)
@@ -564,4 +566,4 @@ def find_optimal_n_clusters(inertias):
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True,host = '0.0.0.0')
