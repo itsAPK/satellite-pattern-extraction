@@ -238,6 +238,7 @@
       }
 
       async function extractPatterns() {
+        alert('Processing....')
         let cropData = cropper.getData(true); // Get ROI coordinates
 
         const response = await fetch("/extract_patterns", {
@@ -263,7 +264,7 @@
           alert(data.error);
           return;
         }
-
+        alert('Extracted Patterns Successfully')
         console.log(data); // Use the data here
         await displayPatternData(data); // Pass the same data to displayPatternData
       }
